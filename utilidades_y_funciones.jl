@@ -6,6 +6,7 @@ using LinearAlgebra
 using SpecialPolynomials
 using Polynomials
 using Plots, LaTeXStrings
+using Roots,  NLsolve
 
 
 
@@ -13,7 +14,7 @@ using Plots, LaTeXStrings
 export chebyshevT_basis, chebyshevU_basis, matriz_G_Chebyshev,productoInt_Chebyshev, d1, d2
 export Y_k_aproximado,  operador_angular, matriz_AGalerkin, sol_espectral, PL_m1, operador_radial
 export  grafica5_modos_comparativa, despejar_frecuencia, R_ansatz, iteracion_newton, calculo_error_abs
-export  actualizar_convergencia, grafica_convergencia
+export  actualizar_convergencia, grafica_convergencia,calculo_razon_inicial, despejar_omega
 
 #=====================================================#
 # ------------ Base  -------------
@@ -89,7 +90,7 @@ function operador_angular(w::Number, y::Function,  a::Number, s::Number, m::Numb
     c=a*w
     dy = x -> d1(y,x)
     d2y = x -> d2(y,x)
-    return x -> -(1-x^2)*d2y(x)+2x*dy(x)-((c*x^2)-2*c*s+s-(m+s*x)^2/(1-x^2))*y(x)
+    return x -> -(1-x^2)*d2y(x) + 2*x*dy(x)- ((c*x^2)-2*c*s+s-(m+s*x)^2/(1-x^2))*y(x)
 end
 
 function operador_radial( w::Number, H::Function,  a::Number, s::Number, m::Number , M::Number ) 
@@ -185,19 +186,113 @@ function Y_k_aproximado(V::Matrix, tipo::Symbol, k::Int)
 end
 
 #=====================================================#
+#-------------- Metodo  Leaver ------------------------
+
+
+function newton_raphson_complex(f, df, z0; atol=1e-12, rtol=1e-12, maxiter=100)
+    """Función para encontrar la  raiz (compleja)  mas  cercana a la semilla"""
+    z = z0
+    for i in 1:maxiter
+        fz = f(z)
+        dfz = df(z)
+        
+        if dfz == 0
+            error("Derivada nula en la iteración $i. No se puede continuar.")
+        end
+
+        dz = fz / dfz
+        z_new = z - dz
+
+        # Criterio de convergencia absoluto y relativo
+        if abs(dz) < atol || abs(dz) / abs(z) < rtol
+            return z_new
+        end
+
+        z = z_new
+    end
+    error("No convergió después de $maxiter iteraciones.")
+end
+
+
+function calculo_razon_inicial(w::Number,Alm::Number, a::Number, s::Number, m::Number , M::Number, caso:: String)
+    """Funcion para el calculo de la  razon entre los  coeficientes para asegurar 
+        convergencia de la  solucion propuesta en serie de potencias"""
+    # los horizontes
+    rmas= M + sqrt(M^2-a^2)
+    rmenos= M - sqrt(M^2-a^2)
+    R_pm= rmas-rmenos 
+    i= 0+1im
+    
+    #elementos del ansatz ecu.5.20
+    sigmaMas=(2*w*M*rmas-m*a)/(R_pm)
+    sigmaMenos=(2*w*M*rmenos-m*a)/(R_pm)
+    
+    # se toma el  signo positivo en el pm
+    zeta=i*w
+    xi=i*sigmaMas  
+    eta=-i*sigmaMenos
+    # se toma el signo negativo en el pm 
+    #zeta=-i*w
+    #xi=-s-i*sigmaMas  
+    #eta=-s+i*sigmaMenos
+
+    nMax=Int(1e3) #--------->  iteraciones  max  para encontrar  r_0
+
+    if  caso =="Shwa"  # tomados de las notas de Bertti para s=2
+        alfa = n->1+ n^2 + 2*n*(1+zeta) + 2*zeta
+        betta= n->-1 - Alm- 2*n^2+ s^2 - 2*n*(1+4*zeta) - 4*zeta + 8*w^2
+        gamma= n->n^2 - s^2+ 4*n*zeta - 4w^2
+        
+    elseif caso=="Kerr"  # Parametros  sin definir 
+        alfa = n->n+1
+        betta= n->n+2
+        gamma= n->n+3
+    end
+    
+    razon_n1=-gamma(nMax)/betta(nMax)  #  se inicializa  asumiendo convergencia 
+
+
+    for n in (nMax-1):-1:0
+        razon_n0=(-gamma(n+1))/(betta(n+1)+alfa(n+1)*razon_n1)
+        razon_n1=razon_n0
+    end
+    
+    return  razon_n1
+    
+end
+
+function despejar_omega(w_inicial::Number, Aml::Number, a::Number, s::Number, m::Number , M::Number, caso::String)
+    """ Función  para encontrar el omega que cumple la  solución  simultanea  dado Aml"""
+   
+    i=0+1im
+
+    if caso=="Shwa"
+        alfa_0 = w->1+2*i*w
+        betta_0= w->-1-Aml+s^2-4*i*w+8*w^2
+    
+    elseif caso=="Kerr" #parametros  por definir 
+        alfa_0 = w->w+1
+        betta_0= w->w+2
+    end
+
+    f=w-> begin
+        razon_inicial=calculo_razon_inicial(w, Aml, a, s, m, M,caso)
+        betta_0(w) + alfa_0(w)*razon_inicial
+        end
+
+    df= w -> d1(f,w)
+    
+    wN = newton_raphson_complex(f, df, w_inicial)
+
+    return wN
+
+end
+
+
+
+#=====================================================#
 #--------------- Loop Principal------------------------- 
 
-function despejar_frecuencia(L::Vector,A::Vector, a::Number, m::Number,tono::Int) #L:=autoval R A:= autoval S
-    """Encuentra el  valor de w  para un  autovalor del  operador S"""
-    n = length(A)
-    soluciones = Vector{ComplexF64}(undef, n)
-    for  i in 1:n
-        p = Polynomial([(A[i] - L[i]), (-2*a*m), (a^2)])   # estes  es E(w;A)
-        w = roots(p)                                       # aqui hago que tienda a cero
-        soluciones[i] = w[tono]
-    end
-    return soluciones
-end
 
 function calculo_error_abs(v_0::Number,v_1::Number)
     n_re = abs(real(v_1) - real(v_0))
@@ -213,10 +308,12 @@ end
 
 
 function iteracion_newton(a::Number,m::Int,M::Number,n::Int,w_inicial::ComplexF64,
-                             s::Int,N_max::Int,error_max::Float64,tono::Int,l::Int)
+                             s::Int,N_max::Int,error_max::Float64,l::Int)
     iteraciones = zeros(Int, N_max)
     error_w_array = zeros(Float64, N_max)
     error_A_array = zeros(Float64, N_max)
+    V_ang= Vector{Vector{ComplexF64}}(undef, n)
+    
     error_w = 0.0
     error_A = 0.0
     N=1; error=1e2;A_inicial=0
@@ -227,22 +324,18 @@ function iteracion_newton(a::Number,m::Int,M::Number,n::Int,w_inicial::ComplexF6
         A_ang,V_ang=sol_espectral(operador_angular, w_inicial,:ii, a, s, m , M, n) #A:= auto  valores  V:=auto vectores
         println("A_ ang= $A_ang \n")
        
-        U_rad,V_rad=sol_espectral(operador_radial, w_inicial, :i, a, s, m , M, n) 
-        println("U_RAD N=$U_rad \n")
+        Alm=A_ang[l]
+        w_act= despejar_omega(w_inicial, Alm, a, s, m , M,"Shwa") # se utiliza Leaver
+        println("omega =$w_act \n")
        
-        w_act= despejar_frecuencia(U_rad,A_ang, a, m,tono)
-        println("frecuencias =$w_act \n")
-
-
-        error_w=calculo_error_abs(w_inicial,w_act[l])
+        error_w=calculo_error_abs(w_inicial,w_act)
         error_A=calculo_error_abs(A_inicial,A_ang[l])
 
         actualizar_convergencia(iteraciones,error_A_array,error_w_array,N,error_w,error_A)
 
-        w_inicial=w_act[l]
+        w_inicial=w_act
         A_inicial=A_ang[l]
         N+=1 ; error=error_w + error_A
-        
 
     end
 
@@ -253,7 +346,7 @@ function iteracion_newton(a::Number,m::Int,M::Number,n::Int,w_inicial::ComplexF6
         println("Convergencia alcanzada con error en la frecuencia=$error_w  y el error en A=$error_A")
     end
     
-    return  iteraciones,error_A_array,error_w_array, w_inicial,A_inicial, V_ang,V_rad
+    return  iteraciones,error_A_array,error_w_array, w_inicial,A_inicial, V_ang
 end
 
 #=====================================================#
